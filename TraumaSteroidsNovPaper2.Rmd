@@ -1,0 +1,1020 @@
+---
+title: "Traumatic injury is associated with altered adrenal and gonadal steroid synthesis in the prehospital setting"
+date: "Last update: `r format(Sys.time(), '%d %B, %Y')`" 
+author: Laura Bravo
+output:
+  html_document: 
+    code_folding: show
+    theme: united
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  pdf_document: 
+    toc: yes
+fontsize: 14pt
+---
+
+
+<style type="text/css">
+
+h1.title {
+  font-size: 38px;
+  color: Black;
+  text-align: center;
+}
+h4.author { /* Header 4 - and the author and data headers use this too  */
+    font-size: 18px;
+  color: DarkRed;
+  text-align: center;
+}
+h4.date { /* Header 4 - and the author and data headers use this too  */
+  font-size: 18px;
+  color: DarkRed;
+  text-align: center;
+}
+</style>
+
+In this study, we have steroid information of 31 male patients at three different time points after trauma (<1h, 4-12h, 24-48h). Only 26 have complete steroid information for the three time points. We had also immunological information for these patients but it was taken out from the study. Clinical information such as age, MODS, LOS, ISS, Drugs, Fluids.., is also included. 34 healthy controls are also included for reference. 
+
+With those measurements below LOQ - now we impute with LOQ/2
+
+***
+
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(error = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(fig.path = "/Users/lxb732/Desktop/TraumaSteroids/FinalCodeDecember2021/")
+knitr::opts_chunk$set(dev="tiff", 
+               dev.args=list(compression="lzw"),
+               dpi=100)
+knitr::opts_chunk$set(fig.align='center')
+
+
+
+```
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+#Loading packages
+#install_github("kassambara/easyGgplot2")
+require(readxl)
+require(reshape2)
+require(plyr)
+require(lubridate)
+require(stringr)
+require(ggrepel)
+require(data.table)
+require(ggpubr)
+require(readr)
+require(tidyverse)
+require(dplyr)
+require(knitr)
+require(htmltools)
+require(factoextra)
+require(Metrics)
+require(e1071)
+require(ggplot2)
+require(gridExtra)
+require(brglm)
+require(ggstatsplot)
+require(compareGroups)
+require(knitr)
+require(kableExtra)
+require(gtsummary)
+require(dunn.test)
+require(broom)
+require(reshape2)
+require("patchwork")
+require(gam)
+require(mgcv)
+require(ComplexHeatmap)
+
+#this might need github too
+#packageurl <- "https://cran.r-project.org/src/contrib/Archive/repr/repr_1.0.2.tar.gz"
+#install.packages(packageurl, repos=NULL, type="source")
+
+set.seed(132)
+```
+
+# Data import 
+
+## Reference steroid's concentration (LOQ)
+
+File with LOQ concentrations (lowest concentration at which the analyte can not only be reliably detected).It includes the parameter we used at the start, and at which the original analysis was developed (original) and the corrected/revalidated one, where many datapoints were filtered as a result.
+
+Again this file contains all analysis performed with **REVALIDATED LOQ**
+
+```{r}
+
+Steroids <- read_xlsx("SteroidsLow.xlsx")
+Steroids <- Steroids[complete.cases(Steroids),c(2,3,4)]
+names(Steroids) <- c("variable", "LOQ_Original", "LOQ_Revalidation")
+
+```
+
+## Healthy Patients (controls)
+
+34 healthy controls with steroid information. Standard ranges were also recovered and measurements outside those ranges were taken out. 
+
+
+
+```{r, message=FALSE}
+
+#outliers per steroid. 
+#saveRDS(Names, "names.rds")
+
+RealHealthy <- function(HealthyLong, Healthy){
+  
+Names <- data.frame(variable = unique(filter(HealthyLong, Descriptor == "Steroid")$variable))
+Names["LimitLow"] <- c("30","10","1","0.7","2","0.1","2","0.6","1","0.09","0.3","2","0","0.07","0","1", rep("0",7)) #said 1 in progesterone (second to last but then all readings would be off)
+Names["LimitHigh"] <- c("100","650","2.6","3.9","13","0.7","40","4","7","0.6","40","35","10","2.4","10","20",rep("1000",7)) #much less in170HP but then off too * also 11KA4 very high numbers in general - muh than trauma and reference
+Names
+
+Result <- list()
+for (i in names(Healthy)[3:25]){
+
+  Q <- quantile(Healthy[[i]], probs=c(.25, .75), na.rm = FALSE)
+iqr <- IQR(Healthy[[i]])
+LimitHigh <-  Q[2]+1.5*iqr # Upper Range  
+LimitLow <- Q[1]-1.5*iqr # 
+Result[[i]] <- c(LimitLow, LimitHigh)
+
+}
+
+ResultDF <- Result %>% 
+  bind_rows() %>%
+  add_column(variable = names(Healthy)[3:25])
+
+names(ResultDF) <- c("LimitLow", "LimitHigh", "variable")
+
+#a <- full_join(HealthyLong,Names)
+a <- full_join(HealthyLong,ResultDF)
+
+a$LimitLow <- as.numeric(a$LimitLow)
+a$LimitHigh <- as.numeric(a$LimitHigh)
+
+a1 <- a %>% 
+  mutate(TakeOut = value >= (LimitLow)  & value <= (LimitHigh)) #take out ten percent of readings? -- Yes
+
+#pdf("Outliers2.pdf", 9, 9)
+#print(ggplot(a1, aes(x=variable, y=value)) + geom_boxplot(outlier.colour = NULL) + geom_point(aes(colour = TakeOut)) #+ facet_wrap(~ variable, scales = "free") + theme_bw())
+#dev.off()
+
+HealthyAll <- a1 %>% 
+  filter( TakeOut == "TRUE") %>% 
+  select(-c("LimitLow","LimitHigh", "TakeOut"))
+
+return(HealthyAll)
+
+}
+
+Healthy <- read_delim("FinalHealthyPat.csv", 
+    ";", escape_double = FALSE, locale = locale(decimal_mark = ",",
+ grouping_mark = "."), trim_ws = TRUE) %>% 
+  select(-Age) #Take out Age for healthy - should be age matched either way.
+
+names(Healthy)<- c("ID", "Label", "Cortisone", "Cortisol", "11KT","11KA4", "11OHA4","11OHT", "Corticosterone", "11-deoxycortisol", "Androstenedione", "11-deoxycorticosterone", "Testosterone", "DHEA", "17-hydroxyprogesterone", "Dihydrotestosterone", "Progesterone", "DHEAS", "Cortisol/Cortisone", "DHEA/DHEAS", "Cortisol/DHEAS", "Cortisol/DHEA", "DHEA/Testosterone", "Testosterone/Cortisol", "Aldosterone") #distinguish between trauma and healthy control
+
+HealthyLong <- reshape2::melt(Healthy, id.vars=c("ID","Label"))
+
+#pdf("Outliers.pdf", 9, 9)
+#print(ggplot(HealthyLong, aes(x=variable, y=value)) + geom_boxplot(outlier.colour = NULL) + facet_wrap(~ variable, #scales = "free") + theme_bw())
+#dev.off()
+
+HealthyLong <- HealthyLong %>% 
+  mutate(Time = "HC", 
+         Descriptor = "Steroid") 
+
+#HealthyLong <- RealHealthy(HealthyLong, Healthy) #LOQ feeds out of this one so all fine
+
+HealthyLongLOQ <- full_join(HealthyLong,Steroids) %>%
+  replace_na(list(LOQ_Original = 0, LOQ_Revalidation = 0)) %>% 
+  #filter(value >= LOQ_Revalidation) #change to all below limit: 
+  mutate(value = ifelse(value < as.numeric(LOQ_Revalidation), as.numeric(LOQ_Revalidation)/2, value ))
+
+HealthyWideLOQ <- HealthyLongLOQ %>% 
+  select(ID, Label, variable, value, Descriptor) %>%
+  pivot_wider(names_from = variable, values_from = value)
+
+#take out healthy patients that do not follow normal ranges (??)
+
+```
+
+
+
+## Non healthy Patients (trauma)
+
+31 trauma patients with cytokine, immunological and clincal information at three different time points. 
+
+(Lesson: pivot longer will put problems with types and classes of columns but melt wont).
+
+```{r}
+
+Trauma <- read_csv("FinalDatasetAprilwCytokines.csv") #non healthy patients
+
+
+Trauma <- Trauma %>% 
+  mutate('cortisol/DHEA- T2' = (as.numeric(`Cortisol- T2`))/as.numeric(`DHEA- T2`)) # error in excel!
+
+names(Trauma)[1] <- "ID"
+
+TraumaLong <- reshape2::melt(Trauma, id.vars=c(1))
+
+TakeOut <- c(grep("^[*]",TraumaLong$value),which(TraumaLong$value %in% c("ND","OOR <"))) #Take out spurious values 
+
+TraumaLong <- TraumaLong[-c(TakeOut),] %>% 
+  drop_na() %>% 
+  mutate(Label = "Trauma")
+
+TraumaLong[,c("variable","Time") ] <- str_split_fixed(TraumaLong$variable, "-", 2)
+
+TraumaLong$Time <- gsub(" ","",TraumaLong$Time)
+
+TraumaLong$Time <- as.factor(TraumaLong$Time)
+
+levels(TraumaLong$Time) <- c("Clinical","T1","T2","T3")
+
+'%ni%' <- Negate('%in%')
+
+TraumaLong <- TraumaLong %>%
+  filter(variable %ni% c("IL1ra","IL6", "IL8","IL10","GCSF", "MCP1", "TNFa","IL12","IL17", "Lymphocyte (106/L)","Monocyte (106/L)","Neutro:Lymph ratio","Neutrophil (106/L)","WBC (106/L)","IG (106/L)")) %>%
+  mutate(Descriptor = ifelse(Time == "Clinical", "Clinical", "Steroid"))
+
+TraumaLong$variable <- as.factor(TraumaLong$variable)
+
+levels(TraumaLong$variable) <-c("11-deoxycortisol","11KA4","11KT","11OHA4","11OHT","17-hydroxyprogesterone", "Androstenedione","Age","Alcohol", "Aldosterone","Anaesthetic","Corticosterone","Cortisol",
+"Cortisol/Cortisone","Cortisol/DHEA","Cortisol/DHEAS","Cortisone","DHEA","DHEA/DHEAS","DHEA/Testosterone","DHEAS",
+                              "Dihydrotestosterone","11-deoxycorticosterone","Fluids","GCS","GoldenHour","ISS","MODS", "Lactate","LOS","Mechanisms","NISS","Outcome","Drug","Progesterone","Sex","Testosterone","Testosterone/Cortisol",
+                                 "T1","T2","T3")
+
+
+TraumaWide <- TraumaLong %>%
+  select(- c(Label, Descriptor)) %>%
+  pivot_wider(values_from = value, names_from= c(Time,variable))
+
+
+TraumaLongLOQ <- full_join(TraumaLong,Steroids) %>%
+  replace_na(list(LOQ_Original = 0, LOQ_Revalidation = 0)) %>% 
+   mutate(value = ifelse(value < as.numeric(LOQ_Revalidation), as.numeric(LOQ_Revalidation)/2, value )) ######changed 
+
+names(TraumaLongLOQ)[1] <- "ID"
+
+TraumaWideLOQ <- TraumaLongLOQ %>% 
+  select(ID, Label, Time, variable, value) %>%
+  pivot_wider(names_from = c(Time,variable), values_from = value)
+
+```
+
+***
+
+
+```{r}
+
+AllDataLOQLong <- rbind(TraumaLongLOQ, HealthyLongLOQ)
+AllDataLong <- rbind(TraumaLong, HealthyLong)
+```
+
+***
+
+## Boxplot steroid description 
+
+General steroid concentration changes at the three different time points 
+
+```{r include=FALSE}
+
+#P value functions and plots
+
+PVal2 <-  function(my_comparisons, Groups){
+CN <- my_comparisons
+
+# Dunn
+pv2 <- data.frame(with(Groups, dunn.test(value,Time,kw=FALSE,method="BH",table = FALSE))[4:5]) %>% 
+  separate(comparisons, c("group2", "group1")) %>%
+  reshape::rename( c("P.adjusted" = "p.value" )) %>%
+  filter(group2 == "HC") 
+
+pv2a <- data.frame(with(Groups, dunn.test(value,Time,kw=FALSE,method="bonferroni", table = FALSE))[4:5]) %>% 
+  separate(comparisons, c("group2", "group1")) %>%
+  reshape::rename( c("P.adjusted" = "p.value" ) ) %>%
+  filter(group2 == "HC")
+
+# Wilcoxon
+pv <- tidy(with(Groups, pairwise.wilcox.test(value, Time, p.adjust.method = "BH", paired = FALSE ))) %>%
+  filter(group2 == "HC")  #why group2 before? 
+
+pva <- tidy(with(Groups, pairwise.wilcox.test(value, Time, p.adjust.method = "bonferroni", paired = FALSE ))) %>%
+  filter(group2 == "HC")
+
+
+PVal <- function(pv_final){
+  
+pv_final <- pv_final[order(pv_final$group1), ] 
+pv_final <- pv_final %>%
+  mutate( map_signif2 = case_when(  
+  p.value > 0.05 ~ "ns", 
+  0.01 < p.value & p.value <= 0.05 ~ "*",
+  0.001 < p.value & p.value <= 0.01 ~ "**",
+  0.0001 < p.value & p.value <= 0.001 ~ "***", 
+  TRUE ~ "****")) 
+
+
+}
+
+pp <- list(pv2, pv2a, pv, pva)
+pl <- map(pp, PVal)
+
+return(pl)
+  }
+
+
+
+PValPlots <- function(Groups, plFin, CN){
+  
+  if (Groups$variable[1] == "DHEA"){
+    
+    MaxVal <- 60} else{
+  
+  MaxVal <- as.numeric(quantile(Groups$value, probs=c(0.1, 0.25,0.5, 0.75, 0.9),na.rm=TRUE)[5])
+    }
+   #MaxVal <- max(Groups$value) 
+   
+  l <- data.frame(table(Groups$Time))
+  
+  bp.vals <- function(x, probs=c(0.1, 0.25,0.5,  0.75, 0.9)) {
+  r <- quantile(x, probs=probs , na.rm=TRUE)
+  r = c(r)
+  names(r) <- c("ymin", "lower", "middle", "upper", "ymax")
+  r
+}
+
+   p <- ggplot(Groups, aes(x=Time, y=value, fill=Label)) +
+   #geom_boxplot(position=position_dodge(0.8)) +
+      stat_summary(fun.data=bp.vals, geom="boxplot", position=position_dodge(0.8)) +
+ # geom_dotplot(binaxis='y', stackdir='center', position=position_dodge(0.8), stackratio=0.6, dotsize=0.6) +
+   facet_wrap(. ~ variable,ncol=4,scale="free") +
+      theme_ggstatsplot() +
+  theme(strip.text.x = element_blank())+
+ labs(title=paste0( i),size=10) + 
+     scale_fill_manual(values = c("white", "grey80"))
+   
+   if (Groups$LOQ_Revalidation[1] !=0) {
+ k <- p +
+  # stat_compare_means(comparisons=my_comparisons, label = "p.signif",method = "wilcox.test",size=6) + 
+   geom_signif(comparisons=CN,
+              #y_position = c(MaxVal + sd(Groups$value), MaxVal + 1.2*sd(Groups$value), MaxVal + #1.4*sd(Groups$value)),
+              margin_top = 0, 
+              step_increase = 0.1, 
+               annotation= plFin$map_signif2, tip_length = 0, vjust=0, textsize= 4) + #0.2
+  xlab(" ") + 
+   ylab(Groups$Axis) +
+   scale_x_discrete(labels = c(paste0("Healthy Controls \n (n=",l[l$Var1 == "HC",2],")"), paste0("≤1h \n (n=",l[l$Var1 == "T1",2],")") ,paste0("4-12h \n (n=",l[l$Var1 == "T2",2],")"),paste0("48-72h \n (n=",l[l$Var1 == "T3",2],")"))) + 
+   theme(legend.position = "none",
+    legend.key = element_blank(), strip.background = element_rect(colour="white", fill="black")) + 
+ #geom_hline(yintercept= as.numeric(Groups$LOQ_Original[1]), color = "blue", linetype = "dashed") + 
+geom_hline(yintercept= as.numeric(Groups$LOQ_Revalidation[1]), color = "coral", linetype ="dashed") + 
+   #geom_text(aes(x = 0.8, y= as.numeric(LOQ_Revalidation[1]) ,label = as.numeric(LOQ_Revalidation[1]), vjust = 1.5), size = 3, color = "coral") +
+   scale_color_discrete(name = "Y series", labels = c("Y2", "Y1")) +  scale_y_continuous( limits = c(0, NA))} else {
+     
+     k <- p +
+  # stat_compare_means(comparisons=my_comparisons, label = "p.signif",method = "wilcox.test",size=6) + 
+   geom_signif(comparisons=CN,
+               margin_top = 0, 
+              step_increase = 0.1, 
+             # y_position = c(MaxVal + sd(Groups$value), MaxVal + 1.2*sd(Groups$value), MaxVal + #1.4*sd(Groups$value)),
+               annotation= plFin$map_signif2, tip_length = 0, vjust=0, textsize= 4) +#0.2
+  xlab(" ") + 
+   ylab(Groups$Axis) +
+   scale_x_discrete(labels = c(paste0("Healthy Controls \n (n=",l[l$Var1 == "HC",2],")"), paste0("≤1h \n (n=",l[l$Var1 == "T1",2],")") ,paste0("4-12h \n (n=",l[l$Var1 == "T2",2],")"),paste0("48-72h \n (n=",l[l$Var1 == "T3",2],")"))) + 
+   theme(legend.position = "none",
+    legend.key = element_blank(), strip.background = element_rect(colour="white", fill="black")) + 
+ #geom_hline(yintercept= as.numeric(Groups$LOQ_Original[1]), color = "blue", linetype = "dashed") + 
+#geom_hline(yintercept= as.numeric(Groups$LOQ_Revalidation[1]), color = "coral", linetype ="dashed") + 
+  # geom_text(aes(x = 0.8, y= as.numeric(LOQ_Revalidation[1]) ,label = as.numeric(LOQ_Revalidation[1]), vjust = 1.5), size = 3, color = "coral") +
+   scale_color_discrete(name = "Y series", labels = c("Y2", "Y1")) +  scale_y_continuous( limits = c(0, NA))
+     
+     
+   }
+ 
+ }
+   
+```
+
+
+```{r ,message=FALSE, warning=FALSE, include=FALSE}
+
+MineralocorticoidPrec <- c("Progesterone")
+Mineralocorticoids <-  c("11-deoxycorticosterone","Corticosterone","Aldosterone")
+GlucocorticoidPrec <- c("17-hydroxyprogesterone","11-deoxycortisol")
+Glucocorticoids <- c("Cortisol", "Cortisone" )
+AndrogenPrec <- c("DHEA","DHEAS","Androstenedione")
+Androgens <- c("Testosterone", "Dihydrotestosterone")
+OxygenatedAndro <- c("11KA4","11KT","11OHA4","11OHT")
+Ratios <- c("Cortisol/Cortisone", "Cortisol/DHEA","Cortisol/DHEAS","DHEA/DHEAS","DHEA/Testosterone","Testosterone/Cortisol")
+
+
+All2 <- AllDataLong %>%  #here we try all different ones - filtering already included??
+  mutate(Groups = case_when(variable %in% c("Progesterone") ~ "MineralocorticoidPrec", 
+                            variable %in% c("11-deoxycorticosterone","Corticosterone","Aldosterone") ~ "Mineralocorticoids", 
+                            variable %in% c("17-hydroxyprogesterone","11-deoxycortisol") ~ "GlucocorticoidPrec", 
+                            variable %in% c("Cortisol", "Cortisone" ) ~ "Glucocorticoids", 
+                            variable %in% c("DHEA","DHEAS","Androstenedione") ~ "AndrogenPrec", 
+                            variable %in% c("Testosterone", "Dihydrotestosterone") ~ "Androgens", 
+                            variable %in% c("11KA4","11KT","11OHA4","11OHT") ~ "OxygenatedAndro",
+                            variable %in% c("Cortisol/Cortisone", "Cortisol/DHEA","Cortisol/DHEAS","DHEA/DHEAS","DHEA/Testosterone","Testosterone/Cortisol") ~ "Ratios", 
+                            TRUE ~ "No steroid"
+                            ), 
+         Axis = case_when(Groups == "Ratios" ~ " ", 
+                          variable == "DHEAS" ~ "Concentration (μmol/L)", 
+                          TRUE ~ "Concentration (nmol/L)")) %>% 
+  filter(Descriptor == "Steroid")
+
+
+All2 <- All2 %>% 
+  full_join(.,Steroids) %>%
+  replace_na(list(LOQ_Original = 0, LOQ_Revalidation = 0)) %>%
+  mutate(value = ifelse(value < as.numeric(LOQ_Revalidation), as.numeric(LOQ_Revalidation)/2, value ))
+
+All2$variable <- droplevels(as.factor(All2$variable))
+All2$Time <- droplevels(as.factor(All2$Time))
+All2$value <- as.numeric(All2$value)
+All2$Time <- fct_relevel(All2$Time, "HC", "T1", "T2", "T3")
+  
+
+my_comparisons <- list(c("HC", "T1"),c("HC", "T2"),c("HC", "T3"))
+CN <- my_comparisons
+
+k <- list()
+k1 <- list()
+k3 <- list()
+count <- 0
+All2$variable <- as.factor(as.character(All2$variable))
+
+
+HypoTest <- 3
+
+for (i in levels(All2$variable)){
+  
+  print(i)
+  
+ # for (i in "DHEA"){
+  
+   levels(All2$Groups) <- c("light blue", "yellow","orange","green","steelblue3","grey")
+   
+   count <- count + 1
+
+   Groups <- filter(All2, variable == i)
+   
+   
+   ########################
+
+  pl <- (PVal2(my_comparisons,Groups))
+  plFin <- pl[[HypoTest]]
+  
+  k[[i]] <- (PValPlots(Groups,plFin, CN))
+ 
+ ################
+ 
+ #LOQ
+ 
+  
+ Groups2 <- Groups %>%
+   mutate(NewValOriginal = case_when(
+     value < LOQ_Original ~ "low", 
+     TRUE ~ "ok"
+   )) %>%
+   filter(NewValOriginal == "ok")
+  
+ pl2 <-  (PVal2(my_comparisons,Groups)) # no such thing as groups2 now!!! Key is missing values always kept as missing values or now also half? 
+ plFin2 <- pl2[[HypoTest]]
+ 
+ k1[[i]] <- (PValPlots(Groups2,plFin2,CN))
+
+ 
+ 
+ ##################
+ 
+ Groups3 <- Groups %>%
+   mutate(NewValRe = case_when(
+     value < LOQ_Revalidation ~ "low", 
+     TRUE ~ "ok"
+   )) %>%
+   filter(NewValRe == "ok")
+  
+
+pl3 <-  (PVal2(my_comparisons,Groups))# no such thing as Groups3 now!!! Key is missing values always kept as missing values or now also half? 
+plFin3 <- pl3[[HypoTest]]
+ 
+ k3[[i]] <- (PValPlots(Groups,plFin3,CN))
+ 
+}
+
+
+```
+
+
+### Steroid concentration figures
+
+
+
+
+
+```{r Fig1ATrauma, fig.cap = "Figure.1",  fig.height= 4.5, fig.width= 7}
+
+(k3[["Progesterone"]]   |  k3[["17-hydroxyprogesterone"]]) 
+
+```
+
+```{r Fig1Trauma, fig.cap = "Figure.1",  fig.height= 8.5, fig.width= 8}
+
+
+  (k3[["11-deoxycortisol"]]|  k3[["Cortisol"]]) / 
+ (k3[["Cortisone"]] | k3[["Cortisol/Cortisone"]]) 
+
+```
+
+```{r Fig2Trauma,fig.cap = "Figure.2", fig.height= 4, fig.width= 7}
+
+k3[["11-deoxycorticosterone"]] | k3[["Corticosterone"]] #| k3[["Aldosterone"]] 
+
+```
+
+```{r Fig3Trauma, fig.cap = "Figure.3",fig.height=8.5, fig.width= 9}
+
+
+(k3[["DHEA"]] | k3[["DHEAS"]] | k3[["DHEA/DHEAS"]]) /
+(k3[["Androstenedione"]] | k3[["Testosterone"]] | k3[["Dihydrotestosterone"]]) 
+
+```
+
+```{r Fig4Trauma, fig.cap = "Figure.4", fig.height=8, fig.width= 7}
+
+
+(k3[["11OHA4"]]  | k3[["11OHT"]]) /
+(k3[["11KA4"]]  | k3[["11KT"]] )
+
+
+
+```
+
+## Golden Hour Study
+
+Study of steroid concentration at the first time point (<1h). Use of Generalized Additive Models (GAMs) to extract trajectories through time. 
+
+```{r include=TRUE}
+
+
+maxVal <- 60
+
+GAMBuild <- function(a0,type){
+     
+      mod.logsynd.elev.gam <- gam(log(var)~s(GHTime,k=2),data=a0,method="REML") # Set to 2 instead of -1 to build as much models as possible
+      print(gam.check(mod.logsynd.elev.gam,pch=19,cex=.3))
+      newd<-data.frame(GHTime=seq(0,maxVal,by=0.5))
+      pred.elev.synd <- predict.gam(mod.logsynd.elev.gam,newd,se.fit=T)
+      pred.elev.synd$Time<-seq(0,maxVal,by=0.5)
+      pred.elev.synd$Fit<-exp(pred.elev.synd$fit)
+      pred.elev.synd$Lower<-exp(pred.elev.synd$fit-qnorm(0.975)*pred.elev.synd$se.fit)
+      pred.elev.synd$Upper<-exp(pred.elev.synd$fit+qnorm(0.975)*pred.elev.synd$se.fit)
+      pred.elev.synd$Syndecan <- type
+      pred.elev.synd<-as.data.frame(pred.elev.synd)
+      return(pred.elev.synd)
+  }
+
+GAMModel<- function(a,i){
+
+    print("running")
+#a <- mutate(PlotGH, Unhealthy = ifelse(var >= as.numeric((quantile(filter(PlotGH, Label == "Healthy")$var,probs=c(.025,.97))[2])),"yes","no"))
+a2 <- filter(a, GHTime == 0)
+a2["Unhealthy"] <- "yes"
+a <- rbind(a,a2)
+
+a$Unhealthy <- as.factor(a$Unhealthy)
+
+a0 <- filter(a, Unhealthy == "yes")
+a0 %>% arrange(Label) 
+
+pred.elev.synd <- GAMBuild(a0,"Elevated Range")
+
+a1 <- filter(a, Unhealthy == "no")
+a1 %>% arrange(Label) 
+
+#pred.norm.synd <- GAMBuild(a1,"Normal Range")
+
+pred.synd <-rbind(pred.elev.synd) #pred.norm.synd
+
+
+synd.max.plus2<-quantile(subset(a,GHTime==0,var)[,1],c(0.975))
+synd.min.plus2<-quantile(subset(a,GHTime==0,var)[,1],c(0.025))
+
+PlotGH <- PlotGH %>% mutate(Third = 
+  case_when(Label == "Healthy" ~ "Healthy controls", 
+            Unhealthy == "no" ~ "Non-elevated trauma patients", 
+            TRUE ~ "Elevated trauma patients")
+)
+
+
+
+synd.plot2<-ggplot(data=pred.synd,aes(x=Time,y=Fit,group=Syndecan,fill=Syndecan)) + theme_bw(base_size=8) + ggtitle(paste0(i)) + xlab('Time (minutes)') + ylab(i)
+synd.plot2<-synd.plot2 + geom_ribbon(aes(ymax=synd.max.plus2,ymin=synd.min.plus2,fill="Healthy Limits"),col=NA,alpha=0.25) 
+synd.plot2<-synd.plot2 + geom_ribbon(aes(ymin=Lower,ymax=Upper),alpha=0.35) + geom_line(size=1) + scale_x_continuous(limits = c(0,maxVal), breaks=seq(0,maxVal,by=10), labels=seq(0,maxVal,by=10),expand = c(0.01, 0))#+ ylim(-1,60) #explore this more
+synd.plot2<-synd.plot2 + geom_point(data=PlotGH,aes(x=GHTime,y=var,group=Third,colour=Third),shape=21,size=1,fill='black',stroke=0.8)
+
+#Which days sees the mean predicted Syndecan value in elevated patients cross over the upper 2.5th percentile of the distribution of 'Normal' values?
+    
+low.lim <- tryCatch(
+    {
+        pred.elev.synd$Time[which(pred.elev.synd$Lower>synd.max.plus2)[[1]]]
+    },
+    error = function(e){
+        low.lim = 60
+    }
+)
+
+up.lim <- tryCatch(
+    {
+        pred.elev.synd$Time[which(pred.elev.synd$Upper>synd.max.plus2)[[1]]]
+    },
+    error = function(e){
+        up.lim = 0
+    }
+)
+
+#low.lim <- pred.elev.synd$Time[which(pred.elev.synd$Lower>synd.max.plus2)[[1]]]
+#up.lim <- pred.elev.synd$Time[which(pred.elev.synd$Upper>synd.max.plus2)[[1]]]
+est.ave <- pred.elev.synd$Time[which(pred.elev.synd$Fit>synd.max.plus2)[[1]]]
+StartingTime <- c(est.ave,low.lim,up.lim)
+est.line<-data.frame(x.val=c(est.ave,est.ave),y.val=c(0,synd.max.plus2))
+
+
+synd.plot2 <- synd.plot2 + 
+  geom_vline(aes(xintercept=est.line$x.val[1],linetype='Estimated time of onset'), col = "black",lwd=0.7) + scale_color_manual("", values = c("red", "dark green", "blue"), labels = c("Trauma: Elevated levels", "Healthy controls", "Trauma: Non-elevated levels")) + scale_linetype_manual("", values = "dashed") + scale_fill_manual("", values = c("red", "green"), labels = c("Trauma GAM model", "Healthy baseline range")) + guides(fill= guide_legend(title = ""))  + theme(legend.text=element_text(size=10))
+#c("red", "green", "blue")
+# c("Trauma: Elevated range", "Healthy baseline range", "Trauma: Non-elevated range")
+    return(list(synd.plot2,StartingTime))
+}
+
+
+
+
+GAMModel2<- function(a,i){
+
+    print("running")
+#a <- mutate(PlotGH, Unhealthy = ifelse(var >= as.numeric((quantile(filter(PlotGH, Label == "Healthy")$var,probs=c(.025,.97))[2])),"yes","no"))
+a2 <- filter(a, GHTime == 0)
+a2["Unhealthy"] <- "yes"
+a <- rbind(a,a2)
+
+a$Unhealthy <- as.factor(a$Unhealthy)
+
+a0 <- filter(a, Unhealthy == "yes")
+a0 %>% arrange(Label) 
+
+pred.elev.synd <- GAMBuild(a0,"Reduced Range")
+
+a1 <- filter(a, Unhealthy == "no")
+a1 %>% arrange(Label) 
+
+#pred.norm.synd <- GAMBuild(a1,"Normal Range")
+
+pred.synd <-rbind(pred.elev.synd) #pred.norm.synd take out
+
+
+synd.max.plus2<-quantile(subset(a,GHTime==0,var)[,1],c(0.975)) #####
+synd.min.plus2<-quantile(subset(a,GHTime==0,var)[,1],c(0.025)) #####
+
+PlotGH <- PlotGH %>% mutate(Third = 
+  case_when(Label == "Healthy" ~ "Healthy controls", 
+            Unhealthy == "no" ~ "Non-reduced trauma patients", 
+            TRUE ~ "Reduced trauma patients")
+)
+
+
+
+synd.plot2<-ggplot(data=pred.synd,aes(x=Time,y=Fit,group=Syndecan,fill=Syndecan)) + theme_bw(base_size=8) + ggtitle(paste0(i)) + xlab('Time (minutes)') + ylab(i)
+synd.plot2<-synd.plot2 + geom_ribbon(aes(ymax=synd.max.plus2,ymin=synd.min.plus2,fill="Healthy Limits"),col=NA,alpha=0.25) 
+synd.plot2<-synd.plot2 + geom_ribbon(aes(ymin=Lower,ymax=Upper),alpha=0.35) + geom_line(size=1) + scale_x_continuous(limits = c(0,maxVal), breaks=seq(0,maxVal,by=10), labels=seq(0,maxVal,by=10),expand = c(0.01, 0))#+ ylim(-1,60) #explore this more
+synd.plot2<-synd.plot2 + geom_point(data=PlotGH,aes(x=GHTime,y=var,group=Third,colour=Third),shape=21,size=1,fill='black',stroke=0.8)
+
+
+up.lim <- tryCatch(
+    {
+        pred.elev.synd$Time[which(pred.elev.synd$Lower<synd.min.plus2)[[1]]] #Lower>synd.max.plus2 and 60
+    },
+    error = function(e){
+        up.lim = 0
+    }
+)
+
+low.lim <- tryCatch(
+    {
+        pred.elev.synd$Time[which(pred.elev.synd$Upper<synd.min.plus2)[[1]]] #Upper>synd.max.plus2 and 60
+    },
+    error = function(e){
+        low.lim = 60
+    }
+)
+#Which days sees the mean predicted Syndecan value in elevated patients cross over the upper 2.5th percentile of the distribution of 'Normal' values?
+#low.lim<-pred.elev.synd$Time[which(pred.elev.synd$Lower<synd.min.plus2)[[1]]]
+#up.lim<-pred.elev.synd$Time[which(pred.elev.synd$Upper<synd.min.plus2)[[1]]]
+est.ave<-pred.elev.synd$Time[which(pred.elev.synd$Fit<synd.min.plus2)[[1]]]
+StartingTime <- c(est.ave,low.lim,up.lim)
+est.line<-data.frame(x.val=c(est.ave,est.ave),y.val=c(0,synd.min.plus2))
+
+
+synd.plot2 <- synd.plot2 + 
+  geom_vline(aes(xintercept=est.line$x.val[1],linetype='Estimated time of onset'), col = "black",lwd=0.7) + scale_color_manual("", values = c("dark green", "blue", "red"), labels = c("Healthy controls", "Trauma patients within healthy range", "Trauma patients outside healthy range")) + scale_linetype_manual("", values = "dashed") + scale_fill_manual("", values = c("green", "red"), labels = c( "Healthy baseline range",  "Trauma GAM model")) + guides(fill= guide_legend(title = ""))  + theme(legend.text=element_text(size=10))
+#c("green", "blue", "red")
+#c( "Healthy baseline range",  "Trauma: Non-reduced range", "Trauma: Reduced range")
+
+    return(list(synd.plot2,StartingTime))
+}
+
+```
+
+
+```{r warning=FALSE, include=TRUE}
+
+ChosenData <- AllDataLOQLong %>% 
+  filter(variable %ni% c("Aldosterone", "Testosterone/Cortisol", "DHEA/Testosterone", "Cortisol/DHEA","Cortisol/DHEAS")) #added September
+
+ErrorPlots <- list()
+
+
+pQuant <- list()
+pQuant2 <- list()
+StartingTime <- list()
+pQuanta <- list()
+pQuant2a <- list()
+StartingTimea <- list()
+
+variableInt <- ChosenData %>% 
+  filter(Descriptor == "Steroid") %>% 
+  select(variable) %>% 
+  unique() 
+
+for (i in  variableInt$variable){ 
+    
+    tryCatch({
+    
+      print(i)
+    
+PlotGH <- filter(ChosenData, variable %in% c("GoldenHour", i), Time %in% c("Clinical", "T1","HC")) %>% 
+  select(ID, Label, variable, value,Time ) 
+
+PlotGH <- dcast(PlotGH, Label +ID   ~ variable ,na.rm = TRUE)
+
+PlotGH[which(PlotGH$Label == "Healthy Control"), "GoldenHour" ] <- 0
+#PlotGH <- PlotGH[,-c(2)]
+PlotGH <-    PlotGH %>% 
+  mutate_if(names(.) %in% c(i, "GoldenHour"),as.numeric) #%>% 
+  #filter(GoldenHour < 51)
+PlotGH$Label <- as.factor(PlotGH$Label)
+
+levels(PlotGH$Label) <- c("Healthy", "Trauma") #extra trauma here?
+
+        if (i %in% c("Progesterone","Sex","Testosterone","Testosterone/Cortisol")){
+        
+            print("Yes")
+             names(PlotGH) <- c("Label","ID", "GHTime","var")
+
+            }else{
+            
+            names(PlotGH) <- c("Label","ID", "var","GHTime")
+}
+
+
+if ((mean(filter(PlotGH, Label == "Healthy")$var)) <= (mean(filter(PlotGH, Label == "Trauma")$var ,na.rm=TRUE))){
+
+  print(paste0(i,"-elevated"))
+  PlotGH <- mutate(PlotGH, Unhealthy = ifelse(var >= as.numeric((quantile(filter(PlotGH, Label == "Healthy")$var,probs=c(.025,.975))[2])),"yes","no"))   
+ 
+  pQuant2a[[i]] <- ggplot(PlotGH, aes( GHTime,var, colour=Unhealthy))+geom_point()+labs(y= paste(i))+ggtitle(paste0(i))+theme_bw()
+
+  resulta <- GAMModel(PlotGH,i)
+
+}
+  else{
+   
+    print(paste0(i,"-reduced"))
+    PlotGH <- mutate(PlotGH, Unhealthy = ifelse(var <= as.numeric((quantile(filter(PlotGH, Label == "Healthy")$var,probs=c(.025,.975))[1])),"yes","no"))   
+   
+   pQuant2a[[i]] <- ggplot(PlotGH, aes( GHTime,var, colour=Unhealthy))+geom_point()+labs(y= paste(i))+ggtitle(paste0(i)) +theme_bw()
+
+    resulta <- GAMModel2(PlotGH,i)
+    
+  }
+    
+  pQuanta[[i]] <- resulta[[1]] + theme(legend.title=element_blank())
+    StartingTimea[[i]] <- resulta[[2]]
+ 
+}, error=function(e){
+  
+  
+  cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+
+```
+
+
+### Golden Hour GAMs
+
+
+
+```{r GAMs for steroids in first time point (golden hour), fig.cap = "Golden Hour GAM", fig.width= 15, fig.height= 9}
+
+wrap_plots(pQuanta)   + plot_layout(guides = "collect")
+
+```
+
+Original plots with patients above/below normal healthy concentrations. GAMs tries to build two different models (around blue dots and orange dots). As you can see, those steroids without model are those where the separation between orange and blue is practically non existent (e.g DHEA/DHEAS)
+
+```{r Steroids in first time point (golden hour), fig.cap = "Golden Hour All", fig.width= 12, fig.height= 9}
+
+wrap_plots(pQuant2a)  + plot_layout(guides = "collect") 
+
+```
+
+# Starting Time 
+
+```{r}
+
+Angela <- StartingTimea %>% 
+  bind_rows()  %>%
+  data.frame() %>%
+  tibble::add_column(Type =c("average",  "upper.limit", "low.limit")) %>%
+  pivot_longer(-Type) %>%
+  pivot_wider(names_from = Type, values_from = value) %>%
+  arrange(average)
+
+Angela
+
+write.csv(Angela, "/Users/lxb732/Desktop/TraumaSteroids/FinalCodeDecember2021/AngelaStartingTimesFinal.csv", row.names = FALSE)
+
+```
+
+
+Print all figure 6 
+
+```{r All Figures, fig.cap = "All", fig.width= 3, fig.height= 2}
+
+pQuantaAlone <- list()
+
+for (i in seq_along(names(pQuanta))){
+  
+pQuantaAlone[[i]] <- pQuanta[[i]]  + theme(legend.position = "none") 
+
+#pdf(paste0(i,".pdf"), 3,2)
+#
+#print(pQuantaAlone[[i]])
+#
+#dev.off()
+
+
+}
+
+pQuantaAlone
+
+```
+
+
+## Heatmaps
+
+```{r}
+MineralocorticoidPrec <- c("Progesterone")
+Mineralocorticoids <-  c("11-deoxycorticosterone","Corticosterone","Aldosterone")
+GlucocorticoidPrec <- c("17-hydroxyprogesterone","11-deoxycortisol")
+Glucocorticoids <- c("Cortisol", "Cortisone" )
+AndrogenPrec <- c("DHEA","DHEAS","Androstenedione")
+Androgens <- c("Testosterone", "Dihydrotestosterone")
+OxygenatedAndro <- c("11KA4","11KT","11OHA4","11OHT")
+Ratios <- c("Cortisol/Cortisone", "Cortisol/DHEA","Cortisol/DHEAS","DHEA/DHEAS","DHEA/Testosterone","Testosterone/Cortisol")
+
+aa <- list(MineralocorticoidPrec, Mineralocorticoids,GlucocorticoidPrec, Glucocorticoids,AndrogenPrec, Androgens, OxygenatedAndro, Ratios) 
+
+names(aa) <- c("MineralocorticoidPrec", "Mineralocorticoids","GlucocorticoidPrec", "Glucocorticoids","AndrogenPrec","Androgens", "OxygenatedAndro", "Ratios")
+
+aa2 <- do.call( rbind, aa)
+
+ll <- as.data.frame(aa2) %>% 
+  add_rownames() %>%
+  pivot_longer(-rowname) %>% 
+  select(-name) %>%
+  unique() %>%
+  as.data.frame()
+
+names(ll) <- c("name", "value")
+
+
+```
+
+
+<https://github.com/kassambara/ggpubr/issues/65> p value adjust
+
+
+
+
+```{r Average steroid concentration through time no healthy controls , fig.cap = "Heatmap average", fig.width= 8, fig.height= 6}
+# it was working before and now not - issues with names. 
+
+scale_this <- function(x){
+  (x - mean(x, na.rm=TRUE)) / sd(x, na.rm=TRUE)
+}
+
+AldNo <- AllDataLOQLong %>% 
+  filter(variable %ni% c("Aldosterone", "Testosterone/Cortisol", "DHEA/Testosterone", "Cortisol/DHEA","Cortisol/DHEAS"))
+#Heatmapping(AldNo,ll)[[4]]
+
+
+
+Average <-  AldNo %>% 
+  filter(Time != "Clinical") %>%
+  group_by(variable) %>%
+  #mutate(value_scaled = scale_this(as.numeric(value))) %>%
+  ungroup() %>%
+  group_by(variable,Time) %>%
+  mutate(MeanValue = mean(as.numeric(value))) %>%
+  ungroup() %>%
+  select(variable, MeanValue, Time) %>%
+  unique()
+
+#Average$variable <- str_replace(Average$variable,  "11β-OHA4", "11B-OHA4")
+#Average$variable <- str_replace(Average$variable,  "11β-OHT", "11B-OHT")
+
+AverageMat <- pivot_wider(Average,names_from = Time, values_from =MeanValue ) %>%
+      mutate(across(c(T1:T3), ~ log(.x / HC )))
+
+FinalDataHMID <- AverageMat$variable
+AverageMatFinal <- AverageMat %>% as.data.frame() %>%
+  dplyr::select(c("T1", "T2", "T3")) 
+
+names(AverageMatFinal) <- c("≤1h", "4-12h", "48-72h")
+
+FinalDataHMMatrix <- as.matrix(AverageMatFinal)
+rownames(FinalDataHMMatrix) <- FinalDataHMID
+
+ll2 <- ll[match(rownames(FinalDataHMMatrix), ll$value),] %>% 
+  filter(value %ni% c("Aldosterone", "Testosterone/Cortisol", "DHEA/Testosterone", "Cortisol/DHEA","Cortisol/DHEAS")) 
+
+annotation_row = data.frame(
+    
+    Class  = ll2$name
+)
+
+
+rownames(annotation_row) = rownames(FinalDataHMMatrix) 
+
+
+ann_colors = list(
+  
+  Class = c(MineralocorticoidPrec = "brown", Mineralocorticoids = "springgreen4",  GlucocorticoidPrec = "yellow", Glucocorticoids = "orange", AndrogenPrec = "light blue", Androgens = "dark blue", OxygenatedAndro= "snow2", Ratios ="black")
+  
+  )
+
+######
+AveragePlot <- pheatmap(FinalDataHMMatrix,  annotation_row = annotation_row, annotation_colors = ann_colors, fontsize_col = 9,cluster_cols=FALSE)#,
+
+AveragePlot
+
+
+```
+
+
+```{r Average steroid concentration through time no healthy controls No Cluster , fig.cap = "Heatmap average", fig.width= 8, fig.height= 6}
+
+columns <- c("Progesterone", "11-deoxycorticosterone", "Corticosterone", "17-hydroxyprogesterone", "11-deoxycortisol", "Cortisol", "Cortisone","DHEAS", "DHEA", "Androstenedione", "Testosterone", "Dihydrotestosterone","11OHA4","11KA4", "11OHT", "11KT", "Cortisol/Cortisone",  "DHEA/DHEAS")
+
+sub_samp_ordered <- FinalDataHMMatrix[columns, ]
+annotation_row2 <- data.frame(Class = annotation_row[match(columns, rownames(annotation_row)), ])
+rownames(annotation_row2) <- columns
+######
+
+#colors <- c(min(sub_samp_ordered),seq(0.5,1,by=0.5),max(sub_samp_ordered))
+#my_palette <- RColorBrewer::brewer.pal(20, "RdBu")
+
+#colors <- c(0, 0.25, 0.5,  0.99, 1,1.1,  5,  11)
+#my_palette <- c("dark blue", "blue", "light blue", "white", "white", "pink", "red", "dark red")
+
+AveragePlot <- pheatmap(sub_samp_ordered,  annotation_row = annotation_row2, annotation_colors = ann_colors, fontsize_col = 9,cluster_cols=FALSE, cluster_rows = FALSE, angle_col = "0")
+
+#color = my_palette, breaks = colors, scale = 
+#"none", legend = TRUE, legend_breaks = colors
+
+
+AveragePlot
+
+
+
+
+```
+
+
+
